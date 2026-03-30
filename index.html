@@ -1326,6 +1326,77 @@
     letter-spacing: 0.5px;
   }
 
+  /* Multi-Key Slots */
+  .key-list-gap { height: 8px; }
+  .key-slot {
+    background: rgba(6,8,15,0.5);
+    border: 1.5px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 16px 10px;
+    transition: border-color 0.25s;
+  }
+  .key-slot.connected { border-color: rgba(52,211,153,0.4); }
+  .key-slot.quota     { border-color: rgba(251,191,36,0.4); }
+  .key-slot.error     { border-color: rgba(248,113,113,0.35); }
+  .key-slot-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .key-slot-num {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    color: var(--cyan);
+    font-weight: 600;
+    letter-spacing: 1px;
+    flex-shrink: 0;
+  }
+  .key-slot-badge {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    padding: 2px 8px;
+    border-radius: 4px;
+    background: rgba(100,116,139,0.15);
+    color: var(--text-muted);
+    transition: all 0.2s;
+  }
+  .key-slot-badge.connected { background: var(--green-dim); color: var(--green); }
+  .key-slot-badge.quota     { background: rgba(251,191,36,0.12); color: #fbbf24; }
+  .key-slot-badge.error     { background: rgba(248,113,113,0.12); color: #f87171; }
+  .key-slot-badge.testing   { background: rgba(251,191,36,0.12); color: #fbbf24; }
+  .key-slot-remove {
+    margin-left: auto;
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    font-size: 14px;
+    line-height: 1;
+    padding: 2px 6px;
+    border-radius: 4px;
+    transition: color 0.2s, background 0.2s;
+  }
+  .key-slot-remove:hover { color: #f87171; background: rgba(248,113,113,0.1); }
+  .key-slot-info {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-top: 5px;
+    min-height: 15px;
+  }
+  .key-actions-row {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    margin-top: 14px;
+    flex-wrap: wrap;
+  }
+  .key-actions-hint {
+    font-size: 12px;
+    color: var(--text-muted);
+    margin-left: 4px;
+  }
+
   /* Analyze Upload */
   .analyze-upload-zone {
     border: 2px dashed rgba(167,139,250,0.25);
@@ -2089,16 +2160,17 @@
         </div>
       </div>
 
-      <!-- Key input -->
-      <label class="field-label" style="margin-top:4px;">GEMINI API KEY</label>
-      <div class="api-key-row">
-        <input type="password" class="api-key-input" id="apiKeyInput" placeholder="AIzaSy...（粘贴你的 API Key）">
-        <button class="btn btn-primary" onclick="saveAndTestApiKey()" style="padding:11px 20px;font-size:13px;white-space:nowrap;">保存并验证</button>
-        <button class="btn btn-secondary" onclick="clearApiKey()" style="padding:11px 16px;font-size:13px;">清除</button>
+      <!-- Multi-key list -->
+      <label class="field-label" style="margin-top:4px;">GEMINI API KEYS — 支持多账号轮转</label>
+      <div id="keyListContainer"></div>
+      <div class="key-actions-row">
+        <button class="btn btn-secondary" onclick="addKeySlot()" id="addKeyBtn" style="padding:9px 16px;font-size:13px;">+ 添加 Key</button>
+        <button class="btn btn-primary" onclick="verifyAllKeys()" style="padding:9px 20px;font-size:13px;">验证全部</button>
+        <span class="key-actions-hint">最多 5 个 Key，额度自动轮转</span>
       </div>
-      <div class="api-free-note">
+      <div class="api-free-note" style="margin-top:12px;">
         <span class="api-free-badge">FREE</span>
-        免费额度完全够用于科研插图分析，无需付费或绑卡
+        每个 Google 账号有独立免费额度，多 Key 叠加额度，无需绑卡
         &nbsp;·&nbsp;
         <a href="https://ai.google.dev/pricing" target="_blank" rel="noopener" style="color:var(--cyan);font-size:12px;">查看定价详情</a>
       </div>
@@ -2826,63 +2898,168 @@ function toggleApiConfig() {
   header.classList.toggle('open', !isOpen);
 }
 
-async function saveAndTestApiKey() {
-  const key = document.getElementById('apiKeyInput').value.trim();
+// ── Multi-Key State ─────────────────────────────────────────────────
+let apiKeysList = []; // [{key, model, status}]  status: unverified|connected|quota|error
+const MAX_KEYS = 5;
+const GEMINI_MODELS = ['gemini-2.0-flash-lite', 'gemini-2.0-flash'];
+
+function loadApiKeys() {
+  try {
+    const saved = localStorage.getItem('figforge_gemini_keys');
+    if (saved) {
+      apiKeysList = JSON.parse(saved);
+      if (!Array.isArray(apiKeysList) || apiKeysList.length === 0) throw new Error();
+    } else {
+      // Migrate from old single-key storage
+      const oldKey = localStorage.getItem('figforge_gemini_key');
+      const oldModel = localStorage.getItem('figforge_gemini_model');
+      if (oldKey) {
+        apiKeysList = [{ key: oldKey, model: oldModel || null, status: 'connected' }];
+        saveApiKeys();
+        localStorage.removeItem('figforge_gemini_key');
+        localStorage.removeItem('figforge_gemini_model');
+      } else {
+        apiKeysList = [{ key: '', model: null, status: 'unverified' }];
+      }
+    }
+  } catch(e) {
+    apiKeysList = [{ key: '', model: null, status: 'unverified' }];
+  }
+}
+
+function saveApiKeys() {
+  localStorage.setItem('figforge_gemini_keys', JSON.stringify(apiKeysList));
+}
+
+function renderKeyList() {
+  const container = document.getElementById('keyListContainer');
+  if (!container) return;
+  const STATUS_LABEL = { unverified: '未验证', connected: '✓ 已连接', quota: '⚠ 额度耗尽', error: '✗ 验证失败', testing: '验证中...' };
+  const BADGE_CLASS  = { connected: 'connected', quota: 'quota', error: 'error', testing: 'testing' };
+  const SLOT_CLASS   = { connected: 'connected', quota: 'quota', error: 'error' };
+  container.innerHTML = apiKeysList.map((k, i) => {
+    const label = STATUS_LABEL[k.status] || '未验证';
+    const bc = BADGE_CLASS[k.status] || '';
+    const sc = SLOT_CLASS[k.status] || '';
+    const info = (k.status === 'connected' && k.model) ? `使用 ${k.model}` : (k.status === 'quota' ? '所有模型额度耗尽，请更换账号' : '');
+    const removeBtn = apiKeysList.length > 1 ? `<button class="key-slot-remove" onclick="removeKeySlot(${i})" title="移除此 Key">✕</button>` : '';
+    return `<div class="key-slot ${sc}" id="keySlot-${i}">
+      <div class="key-slot-header">
+        <span class="key-slot-num">KEY #${i+1}</span>
+        <span class="key-slot-badge ${bc}" id="keyBadge-${i}">${label}</span>
+        ${removeBtn}
+      </div>
+      <div class="api-key-row" style="margin-top:8px;">
+        <input type="password" class="api-key-input${k.status==='connected'?' saved':''}" id="keyInput-${i}" placeholder="AIzaSy...（粘贴你的 API Key）" value="${(k.key||'').replace(/"/g,'&quot;')}">
+        <button class="btn btn-primary" onclick="verifyKey(${i})" style="padding:11px 16px;font-size:13px;white-space:nowrap;">验证</button>
+      </div>
+      <div class="key-slot-info" id="keyInfo-${i}">${info}</div>
+    </div><div class="key-list-gap"></div>`;
+  }).join('');
+  // Toggle add-key button
+  const addBtn = document.getElementById('addKeyBtn');
+  if (addBtn) addBtn.style.display = apiKeysList.length >= MAX_KEYS ? 'none' : '';
+}
+
+function addKeySlot() {
+  if (apiKeysList.length >= MAX_KEYS) return;
+  apiKeysList.push({ key: '', model: null, status: 'unverified' });
+  renderKeyList();
+  const newInput = document.getElementById(`keyInput-${apiKeysList.length - 1}`);
+  if (newInput) newInput.focus();
+}
+
+function removeKeySlot(idx) {
+  apiKeysList.splice(idx, 1);
+  if (apiKeysList.length === 0) apiKeysList.push({ key: '', model: null, status: 'unverified' });
+  saveApiKeys();
+  renderKeyList();
+  updateHeaderStatus();
+}
+
+async function verifyKey(idx) {
+  const input = document.getElementById(`keyInput-${idx}`);
+  const key = input ? input.value.trim() : '';
   if (!key || !key.startsWith('AIza')) {
-    setApiStatus('error', 'Key 格式无效，应以 AIza 开头');
+    apiKeysList[idx] = { key: '', model: null, status: 'error' };
+    renderKeyList();
+    const b = document.getElementById(`keyBadge-${idx}`);
+    if (b) { b.textContent = '✗ Key 格式无效，应以 AIza 开头'; b.className = 'key-slot-badge error'; }
     return;
   }
-  const FALLBACK_MODELS = ['gemini-2.0-flash-lite', 'gemini-2.0-flash'];
-  for (let i = 0; i < FALLBACK_MODELS.length; i++) {
-    const model = FALLBACK_MODELS[i];
-    setApiStatus('testing', `正在验证 (${model})...`);
+  apiKeysList[idx] = { key, model: null, status: 'testing' };
+  renderKeyList();
+  updateHeaderStatus();
+  for (let mi = 0; mi < GEMINI_MODELS.length; mi++) {
+    const model = GEMINI_MODELS[mi];
+    const b = document.getElementById(`keyBadge-${idx}`);
+    if (b) { b.textContent = `测试 ${model}...`; b.className = 'key-slot-badge testing'; }
     try {
       const r = await fetch(
         `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ contents: [{ parts: [{ text: 'hi' }] }] })
-        }
+        { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ contents: [{ parts: [{ text: 'hi' }] }] }) }
       );
       if (!r.ok && r.status >= 500) throw new Error(`服务器错误 (${r.status})`);
       const data = await r.json();
       if (data.error) {
         const msg = data.error.message || '';
-        // Quota / rate-limit → try next model
-        if (msg.toLowerCase().includes('quota') || msg.toLowerCase().includes('resource_exhausted') || (data.error.code === 429)) {
-          if (i < FALLBACK_MODELS.length - 1) continue;
-          setApiStatus('error', '所有模型免费配额已耗尽，请前往 <a href="https://aistudio.google.com/app/apikey" target="_blank" style="color:#00d4ff">Google AI Studio</a> 检查配额或升级套餐');
-          return;
+        if (msg.toLowerCase().includes('quota') || msg.toLowerCase().includes('resource_exhausted') || data.error.code === 429) {
+          if (mi < GEMINI_MODELS.length - 1) continue; // try next model
+          apiKeysList[idx] = { key, model: null, status: 'quota' };
+          saveApiKeys(); renderKeyList(); updateHeaderStatus(); return;
         }
-        setApiStatus('error', `验证失败：${msg}`);
+        apiKeysList[idx] = { key, model: null, status: 'error' };
+        saveApiKeys(); renderKeyList(); updateHeaderStatus();
+        const eb = document.getElementById(`keyBadge-${idx}`);
+        if (eb) { eb.textContent = `✗ ${msg.slice(0,50)}`; eb.className = 'key-slot-badge error'; }
         return;
       }
       // ✅ Success
-      localStorage.setItem('figforge_gemini_key', key);
-      localStorage.setItem('figforge_gemini_model', model);
-      document.getElementById('apiKeyInput').classList.add('saved');
-      setApiStatus('connected', `API Key 已保存 ✓ — 已选用 ${model}`);
-      setTimeout(() => {
-        document.getElementById('apiConfigBody').classList.remove('open');
-        document.getElementById('apiConfigToggle').classList.remove('open');
-        document.getElementById('apiConfigHeader').classList.remove('open');
-      }, 1200);
+      apiKeysList[idx] = { key, model, status: 'connected' };
+      saveApiKeys(); renderKeyList(); updateHeaderStatus();
+      // Auto-collapse if all verified
+      const allDone = apiKeysList.every(k => k.status !== 'unverified' && k.status !== 'testing');
+      if (allDone && apiKeysList.some(k => k.status === 'connected')) {
+        setTimeout(() => {
+          document.getElementById('apiConfigBody').classList.remove('open');
+          document.getElementById('apiConfigToggle').classList.remove('open');
+          document.getElementById('apiConfigHeader').classList.remove('open');
+        }, 1000);
+      }
       return;
     } catch (e) {
-      if (i === FALLBACK_MODELS.length - 1) {
-        setApiStatus('error', `网络错误：${e.message || '请检查连接'}`);
+      if (mi === GEMINI_MODELS.length - 1) {
+        apiKeysList[idx] = { key, model: null, status: 'error' };
+        saveApiKeys(); renderKeyList(); updateHeaderStatus();
+        const eb = document.getElementById(`keyBadge-${idx}`);
+        if (eb) { eb.textContent = `✗ 网络错误`; eb.className = 'key-slot-badge error'; }
       }
     }
   }
 }
 
-function clearApiKey() {
-  localStorage.removeItem('figforge_gemini_key');
-  localStorage.removeItem('figforge_gemini_model');
-  document.getElementById('apiKeyInput').value = '';
-  document.getElementById('apiKeyInput').classList.remove('saved');
-  setApiStatus('none', '未配置 — 点击展开设置');
+async function verifyAllKeys() {
+  for (let i = 0; i < apiKeysList.length; i++) {
+    const input = document.getElementById(`keyInput-${i}`);
+    if (input && input.value.trim()) apiKeysList[i].key = input.value.trim();
+    if (apiKeysList[i].key) await verifyKey(i);
+  }
+}
+
+function updateHeaderStatus() {
+  const connected = apiKeysList.filter(k => k.status === 'connected').length;
+  const withKey   = apiKeysList.filter(k => k.key).length;
+  const quota     = apiKeysList.filter(k => k.status === 'quota').length;
+  if (connected > 0) {
+    setApiStatus('connected', connected === 1
+      ? `1 Key 已连接 — 可开始分析`
+      : `${connected} Keys 已连接 — 自动轮转中`);
+  } else if (withKey > 0 && quota === withKey) {
+    setApiStatus('error', '所有 Key 额度已耗尽 — 请添加新 Google 账号的 Key');
+  } else {
+    setApiStatus('none', '未配置 — 点击展开设置');
+  }
 }
 
 function setApiStatus(state, text) {
@@ -2901,13 +3078,11 @@ function setApiStatus(state, text) {
 }
 
 function initApiConfig() {
-  const saved = localStorage.getItem('figforge_gemini_key');
-  if (saved) {
-    document.getElementById('apiKeyInput').value = saved;
-    document.getElementById('apiKeyInput').classList.add('saved');
-    setApiStatus('connected', 'API Key 已配置 ✓');
-  } else {
-    // Auto-open config panel first time
+  loadApiKeys();
+  renderKeyList();
+  updateHeaderStatus();
+  const hasConnected = apiKeysList.some(k => k.status === 'connected' && k.key);
+  if (!hasConnected) {
     document.getElementById('apiConfigBody').classList.add('open');
     document.getElementById('apiConfigToggle').classList.add('open');
     document.getElementById('apiConfigHeader').classList.add('open');
@@ -2930,13 +3105,14 @@ analyzeImageInput.addEventListener('change', e => {
 });
 
 function loadAnalyzeImage(file) {
-  const key = localStorage.getItem('figforge_gemini_key');
-  if (!key) {
+  const hasKey = apiKeysList && apiKeysList.some(k => k.status === 'connected' && k.key);
+  if (!hasKey) {
     document.getElementById('apiConfigBody').classList.add('open');
     document.getElementById('apiConfigToggle').classList.add('open');
     document.getElementById('apiConfigHeader').classList.add('open');
-    setApiStatus('error', '请先配置 API Key');
-    document.getElementById('apiKeyInput').focus();
+    setApiStatus('error', '请先配置并验证 API Key');
+    const firstInput = document.getElementById('keyInput-0');
+    if (firstInput) firstInput.focus();
     return;
   }
   // MIME check
@@ -3000,8 +3176,14 @@ let isAnalyzing = false;
 
 async function runAnalysis() {
   if (isAnalyzing) return;
-  const key = localStorage.getItem('figforge_gemini_key');
-  if (!key) { setApiStatus('error', '请先配置 API Key'); return; }
+  const connectedKeys = apiKeysList.filter(k => k.status === 'connected' && k.key);
+  if (connectedKeys.length === 0) {
+    setApiStatus('error', '请先配置并验证 API Key');
+    document.getElementById('apiConfigBody').classList.add('open');
+    document.getElementById('apiConfigToggle').classList.add('open');
+    document.getElementById('apiConfigHeader').classList.add('open');
+    return;
+  }
   if (!analyzeImageBase64) return;
 
   isAnalyzing = true;
@@ -3010,7 +3192,6 @@ async function runAnalysis() {
   btn.disabled = true;
   btn.style.opacity = '0.5';
 
-  // Show loading
   document.getElementById('analyzePreviewWrap').classList.add('hidden');
   document.getElementById('analyzeLoadingWrap').classList.remove('hidden');
   document.getElementById('analyzeResultCard').classList.add('hidden');
@@ -3031,73 +3212,77 @@ async function runAnalysis() {
 }
 Return ONLY valid JSON. No markdown, no code fences, no explanation.`;
 
-  const FALLBACK_MODELS = ['gemini-2.0-flash-lite', 'gemini-2.0-flash'];
-  const savedModel = localStorage.getItem('figforge_gemini_model');
-  // Build ordered list: saved model first, then remaining fallbacks
-  const orderedModels = savedModel
-    ? [savedModel, ...FALLBACK_MODELS.filter(m => m !== savedModel)]
-    : FALLBACK_MODELS;
+  function isQuotaErr(msg, code) {
+    return msg.toLowerCase().includes('quota') || msg.toLowerCase().includes('resource_exhausted') || code === 429;
+  }
 
-  let lastError = null;
-  for (let mi = 0; mi < orderedModels.length; mi++) {
-    const model = orderedModels[mi];
-    try {
-      const response = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            contents: [{
-              parts: [
+  // Loop: try each connected key, for each key try all models
+  for (let ki = 0; ki < connectedKeys.length; ki++) {
+    const keyObj = connectedKeys[ki];
+    const orderedModels = keyObj.model
+      ? [keyObj.model, ...GEMINI_MODELS.filter(m => m !== keyObj.model)]
+      : GEMINI_MODELS;
+
+    let keyExhausted = false;
+    for (const model of orderedModels) {
+      try {
+        const response = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${keyObj.key}`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              contents: [{ parts: [
                 { text: systemPrompt },
                 { inline_data: { mime_type: analyzeImageMime, data: analyzeImageBase64 } }
-              ]
-            }],
-            generationConfig: { temperature: 0.2, maxOutputTokens: 4096 }
-          })
+              ]}],
+              generationConfig: { temperature: 0.2, maxOutputTokens: 4096 }
+            })
+          }
+        );
+        if (!response.ok && response.status >= 500) throw new Error(`Gemini 服务器错误 (${response.status})`);
+        const data = await response.json();
+        if (data.error) {
+          if (isQuotaErr(data.error.message || '', data.error.code)) {
+            keyExhausted = true; // exhaust all models for this key
+            continue;
+          }
+          throw new Error(data.error.message);
         }
-      );
-      if (!response.ok && response.status >= 500) throw new Error(`Gemini 服务器错误 (${response.status})`);
-      const data = await response.json();
-      if (data.error) {
-        const msg = data.error.message || '';
-        if (msg.toLowerCase().includes('quota') || msg.toLowerCase().includes('resource_exhausted') || (data.error.code === 429)) {
-          lastError = `${model} 配额已耗尽`;
-          continue; // try next model
+        const raw = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+        if (!raw) throw new Error('Gemini 返回了空内容，请重试');
+        const firstBrace = raw.indexOf('{'), lastBrace = raw.lastIndexOf('}');
+        if (firstBrace === -1 || lastBrace === -1) throw new Error('无法解析返回内容为 JSON');
+        const result = JSON.parse(raw.substring(firstBrace, lastBrace + 1));
+        // ✅ Success — persist the working model back to this key entry
+        const globalIdx = apiKeysList.findIndex(k => k.key === keyObj.key);
+        if (globalIdx !== -1) { apiKeysList[globalIdx].model = model; saveApiKeys(); }
+        showAnalysisResult(result);
+        isAnalyzing = false; btn.disabled = false; btn.style.opacity = '';
+        return;
+      } catch (err) {
+        if (!keyExhausted) {
+          // Non-quota error — surface immediately, don't keep trying other keys
+          document.getElementById('analyzeLoadingWrap').classList.add('hidden');
+          document.getElementById('analyzePreviewWrap').classList.remove('hidden');
+          showAnalyzeError(err.message || '分析失败，请重试');
+          isAnalyzing = false; btn.disabled = false; btn.style.opacity = '';
+          return;
         }
-        throw new Error(msg);
       }
-      const raw = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
-      if (!raw) throw new Error('Gemini 返回了空内容，请重试');
-      // Robust JSON extraction: find first { and last }
-      const firstBrace = raw.indexOf('{');
-      const lastBrace = raw.lastIndexOf('}');
-      if (firstBrace === -1 || lastBrace === -1) throw new Error('无法解析返回内容为 JSON');
-      const jsonStr = raw.substring(firstBrace, lastBrace + 1);
-      const result = JSON.parse(jsonStr);
-      // Save whichever model succeeded
-      localStorage.setItem('figforge_gemini_model', model);
-      showAnalysisResult(result);
-      isAnalyzing = false;
-      btn.disabled = false;
-      btn.style.opacity = '';
-      return;
-    } catch (err) {
-      lastError = err.message;
-      if (mi < orderedModels.length - 1) continue;
+    }
+    // This key is fully exhausted — mark it and try next key
+    if (keyExhausted) {
+      const globalIdx = apiKeysList.findIndex(k => k.key === keyObj.key);
+      if (globalIdx !== -1) { apiKeysList[globalIdx].status = 'quota'; saveApiKeys(); renderKeyList(); updateHeaderStatus(); }
     }
   }
-  // All models failed
+
+  // All keys exhausted
   document.getElementById('analyzeLoadingWrap').classList.add('hidden');
   document.getElementById('analyzePreviewWrap').classList.remove('hidden');
-  const quotaHint = lastError && lastError.includes('配额')
-    ? `${lastError} — 所有模型免费配额已耗尽，请前往 <a href="https://aistudio.google.com/app/apikey" target="_blank" style="color:#00d4ff">Google AI Studio</a> 检查配额`
-    : lastError;
-  showAnalyzeError(quotaHint || '分析失败，请重试');
-  isAnalyzing = false;
-  btn.disabled = false;
-  btn.style.opacity = '';
+  showAnalyzeError('所有 Key 的免费配额已耗尽 — 请在 API 配置区添加新 Google 账号的 Key');
+  isAnalyzing = false; btn.disabled = false; btn.style.opacity = '';
 }
 
 function showAnalysisResult(r) {
