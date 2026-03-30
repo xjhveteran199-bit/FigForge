@@ -2832,7 +2832,7 @@ async function saveAndTestApiKey() {
     setApiStatus('error', 'Key 格式无效，应以 AIza 开头');
     return;
   }
-  const FALLBACK_MODELS = ['gemini-1.5-flash', 'gemini-2.0-flash-lite', 'gemini-2.0-flash'];
+  const FALLBACK_MODELS = ['gemini-2.0-flash-lite', 'gemini-2.0-flash'];
   for (let i = 0; i < FALLBACK_MODELS.length; i++) {
     const model = FALLBACK_MODELS[i];
     setApiStatus('testing', `正在验证 (${model})...`);
@@ -3031,7 +3031,7 @@ async function runAnalysis() {
 }
 Return ONLY valid JSON. No markdown, no code fences, no explanation.`;
 
-  const FALLBACK_MODELS = ['gemini-1.5-flash', 'gemini-2.0-flash-lite', 'gemini-2.0-flash'];
+  const FALLBACK_MODELS = ['gemini-2.0-flash-lite', 'gemini-2.0-flash'];
   const savedModel = localStorage.getItem('figforge_gemini_model');
   // Build ordered list: saved model first, then remaining fallbacks
   const orderedModels = savedModel
