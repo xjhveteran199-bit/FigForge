@@ -2839,7 +2839,10 @@ function saveAndTestApiKey() {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ contents: [{ parts: [{ text: 'hi' }] }] })
   })
-  .then(r => r.json())
+  .then(r => {
+    if (!r.ok && r.status >= 500) throw new Error(`服务器错误 (${r.status})`);
+    return r.json();
+  })
   .then(data => {
     if (data.error) {
       setApiStatus('error', `验证失败：${data.error.message}`);
@@ -2855,7 +2858,7 @@ function saveAndTestApiKey() {
       }, 1200);
     }
   })
-  .catch(() => setApiStatus('error', '网络错误，请检查连接'));
+  .catch(e => setApiStatus('error', `网络错误：${e.message || '请检查连接'}`));
 }
 
 function clearApiKey() {
@@ -2870,6 +2873,8 @@ function setApiStatus(state, text) {
   const txt = document.getElementById('apiStatusText');
   txt.textContent = text;
   dot.className = 'api-status-dot';
+  dot.style.background = '';
+  dot.style.boxShadow = '';
   if (state === 'connected') dot.classList.add('connected');
   else if (state === 'error') dot.classList.add('error');
   else if (state === 'testing') {
@@ -2910,12 +2915,22 @@ analyzeImageInput.addEventListener('change', e => {
 function loadAnalyzeImage(file) {
   const key = localStorage.getItem('figforge_gemini_key');
   if (!key) {
-    // Open config panel and highlight
     document.getElementById('apiConfigBody').classList.add('open');
     document.getElementById('apiConfigToggle').classList.add('open');
     document.getElementById('apiConfigHeader').classList.add('open');
     setApiStatus('error', '请先配置 API Key');
     document.getElementById('apiKeyInput').focus();
+    return;
+  }
+  // MIME check
+  if (!file.type.startsWith('image/')) {
+    showAnalyzeError('请上传图片文件（PNG / JPG / WebP）');
+    return;
+  }
+  // Size limit: 15MB (Gemini inline data safe limit)
+  const MAX_SIZE = 15 * 1024 * 1024;
+  if (file.size > MAX_SIZE) {
+    showAnalyzeError(`图片过大（${(file.size/1024/1024).toFixed(1)}MB），请压缩至 15MB 以内`);
     return;
   }
   const reader = new FileReader();
@@ -2924,10 +2939,11 @@ function loadAnalyzeImage(file) {
     analyzeImageMime = file.type;
     analyzeImageBase64 = dataURL.split(',')[1];
     document.getElementById('analyzePreviewImg').src = dataURL;
-    document.getElementById('analyzeFileName').textContent = file.name;
+    document.getElementById('analyzeFileName').textContent = `${file.name} (${(file.size/1024).toFixed(0)}KB)`;
     document.getElementById('analyzeUploadArea').classList.add('hidden');
     document.getElementById('analyzePreviewWrap').classList.remove('hidden');
     document.getElementById('analyzeResultCard').classList.add('hidden');
+    clearDynamicNotes();
   };
   reader.readAsDataURL(file);
 }
@@ -2941,13 +2957,41 @@ function resetAnalyze() {
   document.getElementById('analyzeLoadingWrap').classList.add('hidden');
   document.getElementById('analyzeResultCard').classList.add('hidden');
   document.getElementById('analyzeImageInput').value = '';
+  clearDynamicNotes();
+}
+
+// Remove all dynamically inserted tip-boxes (accuracy notes + error messages)
+function clearDynamicNotes() {
+  document.querySelectorAll('#analyzeSection > .tip-box, #analyzeResultCard > .tip-box').forEach(el => el.remove());
+}
+
+function showAnalyzeError(msg) {
+  clearDynamicNotes();
+  const errBox = document.createElement('div');
+  errBox.className = 'tip-box';
+  errBox.style.cssText = 'border-left-color:#f87171;background:rgba(248,113,113,0.06);color:#f87171;margin-top:12px;';
+  errBox.innerHTML = `<strong style="color:#f87171;">// Error</strong>${escHtmlAnalyze(msg)}`;
+  const anchor = document.getElementById('analyzePreviewWrap').classList.contains('hidden')
+    ? document.getElementById('analyzeUploadArea')
+    : document.getElementById('analyzePreviewWrap');
+  anchor.after(errBox);
+  setTimeout(() => errBox.remove(), 6000);
 }
 
 // --- Gemini Vision Analysis ---
+let isAnalyzing = false;
+
 async function runAnalysis() {
+  if (isAnalyzing) return;
   const key = localStorage.getItem('figforge_gemini_key');
   if (!key) { setApiStatus('error', '请先配置 API Key'); return; }
   if (!analyzeImageBase64) return;
+
+  isAnalyzing = true;
+  clearDynamicNotes();
+  const btn = document.getElementById('analyzeBtn');
+  btn.disabled = true;
+  btn.style.opacity = '0.5';
 
   // Show loading
   document.getElementById('analyzePreviewWrap').classList.add('hidden');
@@ -2968,7 +3012,7 @@ async function runAnalysis() {
   "enhancePrompt": "<a Gemini image editing prompt that takes the original image and improves it: fix any scientific inaccuracies, improve label clarity, enhance colors for journal standards. 3-4 sentences.>",
   "adaptPrompt": "<a prompt to recreate the same scientific content but in a different, versatile academic style (clean textbook illustration, white background, Helvetica font, colorblind-accessible palette). 3-4 sentences.>"
 }
-Return ONLY valid JSON. No markdown, no explanation.`;
+Return ONLY valid JSON. No markdown, no code fences, no explanation.`;
 
   try {
     const response = await fetch(
@@ -2983,32 +3027,36 @@ Return ONLY valid JSON. No markdown, no explanation.`;
               { inline_data: { mime_type: analyzeImageMime, data: analyzeImageBase64 } }
             ]
           }],
-          generationConfig: { temperature: 0.2, maxOutputTokens: 1500 }
+          generationConfig: { temperature: 0.2, maxOutputTokens: 4096 }
         })
       }
     );
+    if (!response.ok && response.status >= 500) throw new Error(`Gemini 服务器错误 (${response.status})`);
     const data = await response.json();
     if (data.error) throw new Error(data.error.message);
     const raw = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
-    // Strip possible markdown code fences
-    const jsonStr = raw.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```$/i, '').trim();
+    if (!raw) throw new Error('Gemini 返回了空内容，请重试');
+    // Robust JSON extraction: find first { and last }
+    const firstBrace = raw.indexOf('{');
+    const lastBrace = raw.lastIndexOf('}');
+    if (firstBrace === -1 || lastBrace === -1) throw new Error('无法解析返回内容为 JSON');
+    const jsonStr = raw.substring(firstBrace, lastBrace + 1);
     const result = JSON.parse(jsonStr);
     showAnalysisResult(result);
   } catch (err) {
     document.getElementById('analyzeLoadingWrap').classList.add('hidden');
     document.getElementById('analyzePreviewWrap').classList.remove('hidden');
-    // Show error in tip box style
-    const errBox = document.createElement('div');
-    errBox.className = 'tip-box';
-    errBox.style.cssText = 'border-left-color:#f87171;background:rgba(248,113,113,0.06);color:#f87171;margin-top:12px;';
-    errBox.innerHTML = `<strong style="color:#f87171;">// Analysis Error</strong>${escHtmlAnalyze(err.message)}`;
-    document.getElementById('analyzePreviewWrap').after(errBox);
-    setTimeout(() => errBox.remove(), 6000);
+    showAnalyzeError(err.message);
+  } finally {
+    isAnalyzing = false;
+    btn.disabled = false;
+    btn.style.opacity = '';
   }
 }
 
 function showAnalysisResult(r) {
   document.getElementById('analyzeLoadingWrap').classList.add('hidden');
+  clearDynamicNotes();
 
   // Populate insight chips
   const chips = [
@@ -3038,7 +3086,7 @@ function showAnalysisResult(r) {
   document.getElementById('analyzeResultCard').scrollIntoView({ behavior: 'smooth' });
 
   // Show accuracy note if present
-  if (r.scientificAccuracy && r.scientificAccuracy !== 'none') {
+  if (r.scientificAccuracy && r.scientificAccuracy.toLowerCase() !== 'none' && r.scientificAccuracy !== '—') {
     const note = document.createElement('div');
     note.className = 'tip-box';
     note.style.marginTop = '14px';
@@ -3076,12 +3124,8 @@ function sendToWizard() {
   }
 }
 
-function escHtmlAnalyze(s) {
-  const d = document.createElement('div'); d.textContent = s; return d.innerHTML;
-}
-
-// Init on load
-initApiConfig();
+// Reuse existing escHtml from Refine mode
+const escHtmlAnalyze = escHtml;
 </script>
 </body>
 </html>
