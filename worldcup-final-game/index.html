@@ -1,0 +1,765 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>2026世界杯决赛 · 冠军模拟</title>
+<style>
+  html,body{margin:0;height:100%;background:#0d0a28;overflow:hidden}
+  #c{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);touch-action:manipulation;cursor:pointer}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+"use strict";
+/* ============ 画布 ============ */
+const W = 720, H = 1280;
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+function fit(){
+  const ar = W/H;
+  let ch = innerHeight, cw = ch*ar;
+  if (cw > innerWidth){ cw = innerWidth; ch = cw/ar; }
+  cv.style.width = cw+'px'; cv.style.height = ch+'px';
+  const dpr = Math.min(2, devicePixelRatio||1);
+  cv.width = Math.round(cw*dpr); cv.height = Math.round(ch*dpr);
+}
+addEventListener('resize', fit); fit();
+
+const TAU = Math.PI*2;
+const rad = d => d*Math.PI/180;
+const clamp = (v,a,b)=>Math.max(a,Math.min(b,v));
+function angDiff(a,b){ let d=(a-b)%TAU; if(d>Math.PI)d-=TAU; if(d<-Math.PI)d+=TAU; return d; }
+
+/* ============ 插画底图 ============ */
+const BG = new Image();
+BG.src = 'assets/bg.webp';
+let bgReady=false;
+BG.onload = ()=>{ bgReady=true; };
+// 底图中大力神杯区域(以941×1672原图为基准,绘制时按实际尺寸换算),夺冠页放大展示用
+const CUP_CROP = { sx:376, sy:1395, sw:175, sh:240 };
+
+/* ============ 队伍 & 旗帜纹理 ============ */
+const TEAM_A = { name:'阿根廷', epithet:'蓝白军团', color:'#74ACDF', glow:'#8fc5f0', ink:'#2e6fbe',
+  stripes:[['#74ACDF',1],['#FFFFFF',1],['#74ACDF',1]], sun:true };
+const TEAM_B = { name:'西班牙', epithet:'斗牛军团', color:'#E03A3E', glow:'#ffb84d', ink:'#c23535',
+  stripes:[['#AA151B',1],['#F1BF00',2],['#AA151B',1]], emblem:true };
+
+function makeFlagTex(team){
+  const s=128, c=document.createElement('canvas'); c.width=c.height=s;
+  const g=c.getContext('2d');
+  g.save(); g.beginPath(); g.arc(s/2,s/2,s/2,0,TAU); g.clip();
+  const total=team.stripes.reduce((a,x)=>a+x[1],0); let y=0;
+  for(const [col,wgt] of team.stripes){ const h=s*wgt/total; g.fillStyle=col; g.fillRect(0,y-1,s,h+2); y+=h; }
+  if(team.sun){
+    g.fillStyle='#F6B40E'; g.beginPath(); g.arc(s/2,s/2,13,0,TAU); g.fill();
+    g.strokeStyle='#F6B40E'; g.lineWidth=3.5;
+    for(let i=0;i<12;i++){ const a=i*TAU/12;
+      g.beginPath();
+      g.moveTo(s/2+Math.cos(a)*16, s/2+Math.sin(a)*16);
+      g.lineTo(s/2+Math.cos(a)*23, s/2+Math.sin(a)*23);
+      g.stroke();
+    }
+  }
+  if(team.emblem){
+    g.fillStyle='#AD1519';
+    g.beginPath();
+    g.moveTo(38,52); g.lineTo(58,52); g.lineTo(58,72); g.quadraticCurveTo(48,80,38,72);
+    g.closePath(); g.fill();
+    g.fillStyle='#F1BF00'; g.fillRect(44,56,8,10);
+  }
+  g.restore();
+  return c;
+}
+// 赛璐璐光影层(不随球旋转)
+function makeShadeTex(){
+  const s=128, c=document.createElement('canvas'); c.width=c.height=s;
+  const g=c.getContext('2d');
+  g.beginPath(); g.arc(s/2,s/2,s/2,0,TAU); g.clip();
+  const rg=g.createRadialGradient(s*0.35,s*0.30,8, s/2,s/2,s*0.65);
+  rg.addColorStop(0,'rgba(255,255,255,0.30)');
+  rg.addColorStop(0.45,'rgba(255,255,255,0.03)');
+  rg.addColorStop(1,'rgba(20,10,50,0.45)');
+  g.fillStyle=rg; g.fillRect(0,0,s,s);
+  g.fillStyle='rgba(255,255,255,0.85)';
+  g.beginPath(); g.ellipse(s*0.34,s*0.26,s*0.11,s*0.065,-0.6,0,TAU); g.fill();
+  g.beginPath(); g.arc(s*0.50,s*0.17,s*0.032,0,TAU); g.fill();
+  return c;
+}
+TEAM_A.tex = makeFlagTex(TEAM_A);
+TEAM_B.tex = makeFlagTex(TEAM_B);
+const SHADE = makeShadeTex();
+
+/* ============ 场景标定(对位插画元素) ============ */
+const RING = { x:354, y:566, R:262, gapA:-Math.PI/2, gapHalf:rad(15), omega:1.05 };
+const BALL_R = 26;
+
+// 珍珠弹钉(与画中珍珠一一对应;碰撞半径略小于画面,保证球能穿缝)
+const PEGS = [];
+for(const x of [87,177,266,354,442,531,620])  PEGS.push({x, y:894,  r:9});
+for(const x of [133,222,310,399,488,577])     PEGS.push({x, y:962,  r:9});
+for(const x of [177,266,442,531])             PEGS.push({x, y:1026, r:9});
+// 金色光环(扰流圈)
+const BUMPER = { x:354, y:1022, r:26 };
+// 两侧金属护栏
+const WALLS = [
+  {x1:15,  y1:1041, x2:159, y2:1150},
+  {x1:702, y1:1041, x2:561, y2:1150},
+];
+// 金星门柱
+const POSTS = [ {x:285,y:1067,r:15}, {x:429,y:1067,r:15} ];
+// 大力神杯
+const TROPHY = { x:354, y:1177, catchR:62 };
+// 队伍卡牌(画中空白羊皮纸)
+const CARD_L = { x:30,  y:223, w:220, h:113 };
+const CARD_R = { x:463, y:219, w:220, h:120 };
+
+/* ---- 圆环流光粒子 ---- */
+const RINGSP=Array.from({length:24},()=>({
+  b:Math.random()*TAU, sp:(Math.random()<0.5?-1:1)*(0.1+Math.random()*0.35),
+  off:(Math.random()-0.5)*26, r:1+Math.random()*2.2, p:Math.random()*TAU }));
+/* ---- 漂浮光尘 ---- */
+const DUST=Array.from({length:14},()=>({ x:Math.random()*W, y:Math.random()*H,
+  vy:8+Math.random()*14, p:Math.random()*TAU, r:1+Math.random()*1.8 }));
+
+/* ============ 状态 ============ */
+let state='intro';      // intro | play | win
+let balls=[], elapsed=0, timeScale=1, tsTarget=1, slowT=0;
+let winner=null, winAt=0;
+let confetti=[];
+let msg=null;
+let now=0;
+
+function say(text){ msg={text, t:now}; }
+const LINES = {
+  escape: n=>[`${n} 率先突围！直奔大力神杯！`,`${n} 找到缺口！机会来了！`,`${n} 冲出旋转牢笼！`],
+  reenter: n=>[`${n} 竟被吸回了牢笼？！`,`离谱！${n} 又进去了！`],
+  miss: n=>[`${n} 与奖杯擦肩而过！`,`哎呀！${n} 错失良机！`,`${n} 掉出场外，重新来过！`],
+  post: n=>[`${n} 撞上了金星门柱！`,`金星拒绝了 ${n}！`],
+  hype: ()=>['旋转牢笼越转越快！','缺口正在变大……','紧张感拉满！','谁先逃出去？'],
+};
+function pick(arr){ return arr[Math.floor(Math.random()*arr.length)]; }
+
+function makeBall(team, x, dir){
+  return { team, x, y:RING.y-40, vx:dir*(260+Math.random()*120), vy:-(150+Math.random()*150),
+    r:BALL_R, rot:Math.random()*TAU, out:false, bounces:0, misses:0, trail:[],
+    anchor:null, anchorT:0 };
+}
+function reset(toIntro){
+  balls=[ makeBall(TEAM_A, RING.x-90, -1), makeBall(TEAM_B, RING.x+90, 1) ];
+  elapsed=0; timeScale=1; tsTarget=1; slowT=0; winner=null;
+  confetti=[]; msg=null;
+  RING.gapA=-Math.PI/2 + (Math.random()-0.5)*2;
+  state = toIntro ? 'intro' : 'play';
+  if(state==='play'){ whistle(); say('🔔 决赛哨响！两队被关进旋转牢笼！'); }
+}
+reset(true);
+
+/* ============ 音效 ============ */
+let AC=null, lastBeep=0, REC_DEST=null;
+function ac(){ if(!AC){ try{ AC=new (window.AudioContext||window.webkitAudioContext)(); }catch(e){} } return AC; }
+let soundOn=true;
+function tone(f,dur,vol,type,delay){
+  const a=ac(); if(!a||!soundOn) return;
+  const t0=a.currentTime+(delay||0);
+  const o=a.createOscillator(), g=a.createGain();
+  o.type=type||'sine'; o.frequency.value=f;
+  g.gain.setValueAtTime(vol,t0); g.gain.exponentialRampToValueAtTime(0.001,t0+dur);
+  o.connect(g); g.connect(a.destination);
+  if(REC_DEST) g.connect(REC_DEST);
+  o.start(t0); o.stop(t0+dur);
+}
+function bounceSnd(sp){
+  const t=performance.now(); if(t-lastBeep<60) return; lastBeep=t;
+  tone(160+sp/7, 0.06, 0.08, 'triangle');
+}
+function whistle(){ tone(2350,0.10,0.10,'square'); tone(2350,0.22,0.10,'square',0.16); }
+function winSnd(){
+  [523,659,784,1047,1319].forEach((f,i)=>tone(f,0.35,0.14,'triangle',i*0.12));
+  tone(2093,0.8,0.08,'sine',0.65);
+}
+
+/* ============ 物理 ============ */
+const STEP=1/240;
+function step(dt){
+  elapsed+=dt;
+  RING.gapHalf = rad(9 + Math.min(16, elapsed*0.35));
+  RING.omega   = 1.25 + Math.min(0.9, elapsed*0.025);
+  RING.gapA   += RING.omega*dt;
+
+  for(const b of balls){
+    const inRing = !b.out;
+    b.vy += (inRing? 950 : 1500)*dt;
+    b.x += b.vx*dt; b.y += b.vy*dt;
+    b.rot += b.vx*dt/(b.r*1.3);
+
+    const dx=b.x-RING.x, dy=b.y-RING.y, d=Math.hypot(dx,dy)||0.001;
+    const ang=Math.atan2(dy,dx);
+    const ballAng=Math.asin(Math.min(1,b.r/Math.max(d,1)));
+    const inGap = Math.abs(angDiff(ang,RING.gapA)) < RING.gapHalf - ballAng*0.35;
+
+    // 圆环双面碰撞(缺口除外)
+    if(!inGap){
+      const nx=dx/d, ny=dy/d;
+      if(d<RING.R && d>RING.R-b.r){          // 内壁
+        const vn=b.vx*nx+b.vy*ny;
+        if(vn>0){
+          b.vx-=2*vn*nx; b.vy-=2*vn*ny;
+          const sp=Math.hypot(b.vx,b.vy);
+          const k=clamp(sp*1.012,320,1250)/sp;
+          b.vx*=k; b.vy*=k;
+          b.bounces++; bounceSnd(sp);
+          if(b.bounces%18===0 && !b.out) say(pick(LINES.hype()));
+        }
+        b.x=RING.x+nx*(RING.R-b.r); b.y=RING.y+ny*(RING.R-b.r);
+      } else if(d>=RING.R && d<RING.R+b.r){  // 外壁
+        const vn=b.vx*nx+b.vy*ny;
+        if(vn<0){ b.vx-=1.7*vn*nx; b.vy-=1.7*vn*ny; bounceSnd(Math.hypot(b.vx,b.vy)); }
+        b.x=RING.x+nx*(RING.R+b.r); b.y=RING.y+ny*(RING.R+b.r);
+      }
+    }
+    // 突围/回笼 判定(带滞回)
+    if(!b.out && d>RING.R+b.r+6){ b.out=true; say(pick(LINES.escape(b.team.name))); tone(880,0.25,0.12,'sine'); }
+    else if(b.out && d<RING.R-b.r-6){ b.out=false; say(pick(LINES.reenter(b.team.name))); }
+
+    if(b.out){
+      // 边界
+      if(b.x<b.r){ b.x=b.r; b.vx=Math.abs(b.vx)*0.8; }
+      if(b.x>W-b.r){ b.x=W-b.r; b.vx=-Math.abs(b.vx)*0.8; }
+      if(b.y<b.r){ b.y=b.r; b.vy=Math.abs(b.vy)*0.8; }
+      // 珍珠弹钉
+      for(const p of PEGS) circleHit(b,p,0.62,true);
+      // 光环 & 金星门柱
+      circleHit(b,BUMPER,0.85,true);
+      for(const p of POSTS){ if(circleHit(b,p,0.78,true)) { if(Math.random()<0.5) say(pick(LINES.post(b.team.name))); tone(440,0.1,0.08,'square'); } }
+      // 护栏
+      for(const wl of WALLS) lineHit(b,wl,0.55);
+      // 夺冠判定
+      if(Math.hypot(b.x-TROPHY.x, b.y-TROPHY.y) < TROPHY.catchR){ win(b); return; }
+      // 掉底重来
+      if(b.y > H+b.r){
+        b.misses++;
+        say(pick(LINES.miss(b.team.name)));
+        b.x = RING.x + (Math.random()-0.5)*400;
+        b.y = 855; b.vx=(Math.random()-0.5)*160; b.vy=0; b.anchor=null;
+      }
+      // 防僵持:只认"水平挪动或向下前进",原地竖跳不算
+      if(b.y>860){
+        if(!b.anchor || Math.abs(b.x-b.anchor.x)>60 || b.y>b.anchor.y+60){
+          b.anchor={x:b.x,y:b.y}; b.anchorT=0;
+        } else {
+          b.anchorT+=dt;
+          if(b.anchorT>2.2){
+            b.vx+=(Math.random()<0.5?-1:1)*(260+Math.random()*260);
+            b.vy=-320; b.anchor=null;
+          }
+        }
+      } else b.anchor=null;
+      const sp=Math.hypot(b.vx,b.vy);
+      if(sp>1500){ b.vx*=1500/sp; b.vy*=1500/sp; }
+    }
+  }
+  // 球-球碰撞
+  const [a,b]=balls;
+  if(a&&b){
+    const dx=b.x-a.x, dy=b.y-a.y, d=Math.hypot(dx,dy);
+    if(d>0 && d<a.r+b.r){
+      const nx=dx/d, ny=dy/d, overlap=(a.r+b.r-d)/2;
+      a.x-=nx*overlap; a.y-=ny*overlap; b.x+=nx*overlap; b.y+=ny*overlap;
+      const dvn=(b.vx-a.vx)*nx+(b.vy-a.vy)*ny;
+      if(dvn<0){
+        const j=-0.98*dvn;
+        a.vx-=j*nx; a.vy-=j*ny; b.vx+=j*nx; b.vy+=j*ny;
+        bounceSnd(Math.abs(dvn));
+      }
+    }
+  }
+}
+function circleHit(b,p,e,jitter){
+  const dx=b.x-p.x, dy=b.y-p.y, d=Math.hypot(dx,dy), min=b.r+p.r;
+  if(d>0 && d<min){
+    const nx=dx/d, ny=dy/d;
+    b.x=p.x+nx*min; b.y=p.y+ny*min;
+    const vn=b.vx*nx+b.vy*ny;
+    if(vn<0){
+      b.vx-=(1+e)*vn*nx; b.vy-=(1+e)*vn*ny;
+      if(jitter){ const j=(Math.random()-0.5)*90; b.vx+=-ny*j; b.vy+=nx*j; }
+    }
+    return true;
+  }
+  return false;
+}
+function lineHit(b,l,e){
+  const ax=l.x1, ay=l.y1, bx=l.x2, by=l.y2;
+  const abx=bx-ax, aby=by-ay, len2=abx*abx+aby*aby;
+  let t=((b.x-ax)*abx+(b.y-ay)*aby)/len2; t=clamp(t,0,1);
+  const cx=ax+abx*t, cy=ay+aby*t;
+  const dx=b.x-cx, dy=b.y-cy, d=Math.hypot(dx,dy);
+  if(d>0 && d<b.r+11){
+    const nx=dx/d, ny=dy/d;
+    b.x=cx+nx*(b.r+11); b.y=cy+ny*(b.r+11);
+    const vn=b.vx*nx+b.vy*ny;
+    if(vn<0){ b.vx-=(1+e)*vn*nx; b.vy-=(1+e)*vn*ny; }
+  }
+}
+function win(b){
+  winner=b; winAt=now; state='win'; winSnd();
+  const cols=[b.team.color,'#FFD700','#FFFFFF',b.team.stripes[1][0]];
+  for(let i=0;i<160;i++){
+    const a=Math.random()*TAU, sp=250+Math.random()*650;
+    confetti.push({ x:TROPHY.x, y:TROPHY.y-20,
+      vx:Math.cos(a)*sp, vy:Math.sin(a)*sp-450,
+      c:cols[i%cols.length], s:5+Math.random()*8,
+      rot:Math.random()*TAU, vr:(Math.random()-0.5)*12, life:2.5+Math.random()*2 });
+  }
+}
+
+/* ============ 绘制 ============ */
+function roundRect(x,y,w,h,r){
+  ctx.beginPath();
+  ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r);
+  ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath();
+}
+
+function draw(){
+  ctx.setTransform(cv.width/W,0,0,cv.height/H,0,0);
+  if(!bgReady){
+    ctx.fillStyle='#0d0a28'; ctx.fillRect(0,0,W,H);
+    ctx.fillStyle='rgba(255,255,255,0.6)'; ctx.font='26px "Microsoft YaHei",sans-serif';
+    ctx.textAlign='center'; ctx.fillText('加载插画中…', W/2, H/2);
+    return;
+  }
+  // 插画底图
+  ctx.drawImage(BG, 0, 0, W, H);
+
+  drawGap();
+  drawSparkles();
+  drawLiveGlow();
+  for(const b of balls) drawBall(b);
+  drawConfetti();
+  drawUI();
+
+  if(state==='intro') drawIntro();
+  if(state==='win')   drawWin();
+}
+
+/* 缺口:在画好的光环上开一道暗门 */
+function drawGap(){
+  ctx.save();
+  ctx.lineCap='round';
+  // 暗色遮罩(盖住光环形成缺口)
+  ctx.strokeStyle='rgba(18,14,54,0.92)'; ctx.lineWidth=46;
+  ctx.beginPath(); ctx.arc(RING.x,RING.y,RING.R,RING.gapA-RING.gapHalf,RING.gapA+RING.gapHalf); ctx.stroke();
+  ctx.strokeStyle='rgba(18,14,54,0.30)'; ctx.lineWidth=58;
+  ctx.beginPath(); ctx.arc(RING.x,RING.y,RING.R,RING.gapA-RING.gapHalf*0.9,RING.gapA+RING.gapHalf*0.9); ctx.stroke();
+  // 缺口两端亮点
+  for(const s of [-1,1]){
+    const a=RING.gapA+s*RING.gapHalf;
+    ctx.fillStyle='#fff'; ctx.shadowColor='#fff'; ctx.shadowBlur=18;
+    ctx.beginPath(); ctx.arc(RING.x+Math.cos(a)*RING.R, RING.y+Math.sin(a)*RING.R, 6.5,0,TAU); ctx.fill();
+  }
+  ctx.restore();
+  // 场心提示
+  if(state==='play' && !balls.some(b=>b.out)){
+    ctx.fillStyle='rgba(210,200,255,0.6)';
+    ctx.font='22px "Microsoft YaHei",sans-serif'; ctx.textAlign='center';
+    ctx.fillText('— ✦ 谁先逃出旋转牢笼？ ✦ —', RING.x, RING.y+6);
+  }
+}
+
+/* 环上流光 + 光尘 */
+function drawSparkles(){
+  for(const s of RINGSP){
+    const a=s.b+now*s.sp;
+    ctx.globalAlpha=0.25+0.55*Math.abs(Math.sin(now*2+s.p));
+    ctx.fillStyle='#fff6dc';
+    ctx.beginPath();
+    ctx.arc(RING.x+Math.cos(a)*(RING.R+s.off), RING.y+Math.sin(a)*(RING.R+s.off), s.r, 0, TAU);
+    ctx.fill();
+  }
+  for(const d of DUST){
+    d.y-=d.vy*(1/60); d.x+=Math.sin(now+d.p)*0.2;
+    if(d.y<-5){ d.y=H+5; d.x=Math.random()*W; }
+    ctx.globalAlpha=0.20+0.20*Math.sin(now*2+d.p);
+    ctx.fillStyle='#cfe0ff';
+    ctx.beginPath(); ctx.arc(d.x,d.y,d.r,0,TAU); ctx.fill();
+  }
+  ctx.globalAlpha=1;
+}
+
+/* 给画中奖杯/光环补呼吸光,让静态插画"活"起来 */
+function drawLiveGlow(){
+  ctx.save();
+  ctx.globalCompositeOperation='lighter';
+  // 奖杯呼吸
+  const p=0.10+0.07*Math.sin(now*3);
+  const g=ctx.createRadialGradient(TROPHY.x,TROPHY.y-10,8, TROPHY.x,TROPHY.y-10,105);
+  g.addColorStop(0,`rgba(255,205,110,${p})`); g.addColorStop(1,'rgba(255,205,110,0)');
+  ctx.fillStyle=g; ctx.beginPath(); ctx.arc(TROPHY.x,TROPHY.y-10,105,0,TAU); ctx.fill();
+  // 光环绕行星点
+  for(let k=0;k<4;k++){
+    const a=now*1.4+k*Math.PI/2;
+    ctx.globalAlpha=0.6;
+    ctx.fillStyle='#fff2cc';
+    ctx.beginPath();
+    ctx.arc(BUMPER.x+Math.cos(a)*BUMPER.r*1.25, BUMPER.y+Math.sin(a)*BUMPER.r*1.25, 2.4, 0, TAU);
+    ctx.fill();
+  }
+  ctx.restore();
+  ctx.globalAlpha=1;
+}
+
+function drawBall(b){
+  // 彗星拖尾
+  for(let i=0;i<b.trail.length;i++){
+    const p=b.trail[i], t=i/b.trail.length;
+    ctx.globalAlpha=t*0.25;
+    ctx.fillStyle=b.team.color;
+    ctx.beginPath(); ctx.arc(p.x,p.y,b.r*(0.4+t*0.5),0,TAU); ctx.fill();
+  }
+  ctx.globalAlpha=1;
+  // 旗帜(旋转)
+  ctx.save();
+  ctx.translate(b.x,b.y); ctx.rotate(b.rot);
+  ctx.drawImage(b.team.tex,-b.r,-b.r,b.r*2,b.r*2);
+  ctx.restore();
+  // 光影 + 金边描边(不旋转)
+  ctx.drawImage(SHADE, b.x-b.r, b.y-b.r, b.r*2, b.r*2);
+  ctx.strokeStyle='rgba(45,28,10,0.95)'; ctx.lineWidth=3;
+  ctx.beginPath(); ctx.arc(b.x,b.y,b.r+2.5,0,TAU); ctx.stroke();
+  ctx.strokeStyle='#eec66f'; ctx.lineWidth=4;
+  ctx.shadowColor=b.team.glow; ctx.shadowBlur=14;
+  ctx.beginPath(); ctx.arc(b.x,b.y,b.r,0,TAU); ctx.stroke();
+  ctx.shadowBlur=0;
+}
+
+function drawConfetti(){
+  for(const c of confetti){
+    ctx.save();
+    ctx.globalAlpha=clamp(c.life,0,1);
+    ctx.translate(c.x,c.y); ctx.rotate(c.rot);
+    ctx.fillStyle=c.c; ctx.fillRect(-c.s/2,-c.s/2,c.s,c.s*0.6);
+    ctx.restore();
+  }
+  ctx.globalAlpha=1;
+}
+
+/* 卡牌文字(写在画中的空白羊皮纸上) */
+function panelText(card,team,b){
+  const cx=card.x, cy=card.y;
+  // 旗帜勋章
+  const mx=cx+36, my=cy+card.h/2;
+  ctx.save(); ctx.beginPath(); ctx.arc(mx,my,19,0,TAU); ctx.clip();
+  ctx.drawImage(team.tex,mx-19,my-19,38,38); ctx.restore();
+  ctx.strokeStyle='#b08d5a'; ctx.lineWidth=2.5;
+  ctx.beginPath(); ctx.arc(mx,my,19,0,TAU); ctx.stroke();
+  // 文案
+  const tx=cx+64;
+  ctx.textAlign='left';
+  ctx.fillStyle='#4a3520'; ctx.font='bold 23px "Microsoft YaHei",sans-serif';
+  ctx.fillText(team.name, tx, cy+38);
+  ctx.fillStyle='#8a6f4d'; ctx.font='14px "Microsoft YaHei",sans-serif';
+  ctx.fillText(team.epithet+' · 梦之队', tx, cy+59);
+  const status = b.out ? (b.y>1000?'冲向奖杯！':'突围成功！') : '牢笼囚禁中';
+  ctx.fillStyle = b.out ? team.ink : 'rgba(90,70,45,0.75)';
+  ctx.font='bold 16px "Microsoft YaHei",sans-serif';
+  ctx.fillText(status+' · 触球 '+b.bounces, tx, cy+84);
+}
+
+function drawUI(){
+  // 标题(画中缎带上方)
+  ctx.textAlign='center'; ctx.lineJoin='round';
+  ctx.font='bold 38px "Microsoft YaHei",sans-serif';
+  ctx.strokeStyle='#241a4d'; ctx.lineWidth=8;
+  ctx.strokeText('2026 世界杯决赛 · 冠军模拟', W/2, 140);
+  ctx.shadowColor='rgba(255,220,140,0.55)'; ctx.shadowBlur=14;
+  ctx.fillStyle='#f7e3b0';
+  ctx.fillText('2026 世界杯决赛 · 冠军模拟', W/2, 140);
+  ctx.shadowBlur=0;
+  // 缎带文字
+  ctx.fillStyle='#f2d98c'; ctx.font='bold 20px "Microsoft YaHei",sans-serif';
+  ctx.fillText('谁能捧起大力神杯？', W/2, 193);
+  // 卡牌
+  panelText(CARD_L, TEAM_A, balls[0]);
+  panelText(CARD_R, TEAM_B, balls[1]);
+  // 播报:漫画气泡
+  if(msg && now-msg.t<2.6 && state==='play'){
+    const age=now-msg.t, alpha=age<0.2?age/0.2:(age>2.1?(2.6-age)/0.5:1);
+    const pop=age<0.18? 0.8+0.2*(age/0.18) : 1;
+    ctx.save();
+    ctx.globalAlpha=alpha;
+    ctx.translate(W/2,862); ctx.scale(pop,pop); ctx.translate(-W/2,-862);
+    ctx.font='bold 28px "Microsoft YaHei",sans-serif';
+    const tw=ctx.measureText(msg.text).width;
+    ctx.fillStyle='#fffdf3';
+    roundRect(W/2-tw/2-22, 838, tw+44, 48, 24); ctx.fill();
+    ctx.strokeStyle='#2b2350'; ctx.lineWidth=3.5; ctx.stroke();
+    ctx.fillStyle='#2b2350'; ctx.textAlign='center';
+    ctx.fillText(msg.text, W/2, 872);
+    ctx.restore();
+  }
+  // 慢动作提示
+  if(timeScale<0.8 && state==='play'){
+    ctx.fillStyle='rgba(255,215,0,'+(0.5+Math.sin(now*8)*0.3)+')';
+    ctx.font='bold 26px "Microsoft YaHei",sans-serif'; ctx.textAlign='center';
+    ctx.fillText('⚡ 决定性时刻 ⚡', W/2, 992);
+  }
+  // 隐形按钮:左灯笼=重开 右灯笼=声音
+  if(!soundOn){
+    ctx.fillStyle='rgba(255,255,255,0.55)'; ctx.font='16px "Segoe UI Emoji",sans-serif';
+    ctx.fillText('🔇', W-64, 160);
+  }
+  // 水印
+  ctx.fillStyle='rgba(230,214,255,0.55)'; ctx.font='18px "Microsoft YaHei",sans-serif';
+  ctx.fillText('✦ 硅基看球 · AI 物理模拟 ✦', W/2, 1268);
+}
+
+function drawRays(cx,cy,inner,outer,n,alpha,color){
+  ctx.save(); ctx.translate(cx,cy); ctx.rotate(now*0.25);
+  ctx.fillStyle=color; ctx.globalAlpha=alpha;
+  for(let i=0;i<n;i++){
+    const a=i*TAU/n, half=TAU/n*0.28;
+    ctx.beginPath();
+    ctx.moveTo(Math.cos(a-half)*inner, Math.sin(a-half)*inner);
+    ctx.lineTo(Math.cos(a)*outer, Math.sin(a)*outer);
+    ctx.lineTo(Math.cos(a+half)*inner, Math.sin(a+half)*inner);
+    ctx.closePath(); ctx.fill();
+  }
+  ctx.restore(); ctx.globalAlpha=1;
+}
+
+function drawIntro(){
+  ctx.fillStyle='rgba(12,8,40,0.62)'; ctx.fillRect(0,0,W,H);
+  ctx.textAlign='center'; ctx.lineJoin='round';
+  drawRays(W/2, 560, 120, 700, 16, 0.06, '#FFD700');
+  ctx.font='bold 56px "Microsoft YaHei",sans-serif';
+  ctx.strokeStyle='#1a1440'; ctx.lineWidth=12;
+  ctx.strokeText('世界杯决赛之夜', W/2, 320);
+  ctx.fillStyle='#FFD700';
+  ctx.shadowColor='rgba(255,215,0,0.5)'; ctx.shadowBlur=20;
+  ctx.fillText('世界杯决赛之夜', W/2, 320);
+  ctx.shadowBlur=0;
+  ctx.fillStyle='rgba(255,255,255,0.82)'; ctx.font='25px "Microsoft YaHei",sans-serif';
+  ctx.fillText('旋转牢笼 → 珍珠弹钉 → 冲过金星 → 捧杯！', W/2, 372);
+
+  const y=560;
+  for(const [team,x] of [[TEAM_A,W/2-150],[TEAM_B,W/2+150]]){
+    ctx.save(); ctx.translate(x,y);
+    ctx.drawImage(team.tex,-66,-66,132,132);
+    ctx.drawImage(SHADE,-66,-66,132,132);
+    ctx.strokeStyle='#eec66f'; ctx.lineWidth=5;
+    ctx.shadowColor=team.glow; ctx.shadowBlur=25;
+    ctx.beginPath(); ctx.arc(0,0,66,0,TAU); ctx.stroke();
+    ctx.restore();
+    ctx.shadowBlur=0;
+    ctx.fillStyle='#fff'; ctx.font='bold 34px "Microsoft YaHei",sans-serif';
+    ctx.fillText(team.name, x, y+118);
+  }
+  ctx.fillStyle='#FFD700'; ctx.font='italic bold 50px Georgia,serif';
+  ctx.fillText('VS', W/2, y+15);
+
+  ctx.fillStyle='rgba(255,255,255,0.62)'; ctx.font='23px "Microsoft YaHei",sans-serif';
+  ctx.fillText('物理引擎全随机 · 每次结果都不同', W/2, 790);
+  const p=0.6+Math.sin(now*4)*0.4;
+  ctx.fillStyle=`rgba(255,255,255,${p})`; ctx.font='bold 33px "Microsoft YaHei",sans-serif';
+  ctx.fillText('👆 点击屏幕 开球！', W/2, 910);
+}
+
+function drawWin(){
+  const age=now-winAt;
+  ctx.fillStyle=`rgba(8,5,30,${clamp(age*0.8,0,0.78)})`; ctx.fillRect(0,0,W,H);
+  if(age<0.5) return;
+  const b=winner, team=b.team;
+  ctx.textAlign='center'; ctx.lineJoin='round';
+  drawRays(W/2, 430, 90, 620, 14, 0.10, '#FFD700');
+  // 冠军球
+  const by=430, br=80;
+  ctx.save(); ctx.translate(W/2,by); ctx.rotate(now*0.5);
+  ctx.drawImage(team.tex,-br,-br,br*2,br*2); ctx.restore();
+  ctx.drawImage(SHADE,W/2-br,by-br,br*2,br*2);
+  ctx.strokeStyle='rgba(30,22,60,0.95)'; ctx.lineWidth=7;
+  ctx.beginPath(); ctx.arc(W/2,by,br+2,0,TAU); ctx.stroke();
+  ctx.strokeStyle='#FFD700'; ctx.lineWidth=5;
+  ctx.shadowColor='#FFD700'; ctx.shadowBlur=30;
+  ctx.beginPath(); ctx.arc(W/2,by,br+8,0,TAU); ctx.stroke();
+  ctx.shadowBlur=0;
+
+  ctx.font='bold 62px "Microsoft YaHei",sans-serif';
+  ctx.strokeStyle='#1a1440'; ctx.lineWidth=12;
+  ctx.strokeText(team.name, W/2, 586);
+  ctx.fillStyle='#fff'; ctx.fillText(team.name, W/2, 586);
+  ctx.font='bold 45px "Microsoft YaHei",sans-serif';
+  ctx.strokeStyle='#1a1440'; ctx.lineWidth=10;
+  ctx.strokeText('捧起大力神杯！', W/2, 650);
+  ctx.fillStyle='#FFD700'; ctx.fillText('捧起大力神杯！', W/2, 650);
+
+  // 大力神杯冠军卡(取自插画原图,圆角金框)
+  const bob=Math.sin(now*2)*5;
+  const cw=200, chh=274, cx0=W/2-cw/2, cy0=685+bob;
+  ctx.save();
+  ctx.shadowColor='#FFD700'; ctx.shadowBlur=35;
+  roundRect(cx0,cy0,cw,chh,18); ctx.fillStyle='#1a1440'; ctx.fill();
+  ctx.shadowBlur=0;
+  roundRect(cx0,cy0,cw,chh,18); ctx.clip();
+  const kx=BG.naturalWidth/941, ky=BG.naturalHeight/1672;
+  ctx.drawImage(BG, CUP_CROP.sx*kx, CUP_CROP.sy*ky, CUP_CROP.sw*kx, CUP_CROP.sh*ky, cx0, cy0, cw, chh);
+  ctx.restore();
+  roundRect(cx0,cy0,cw,chh,18);
+  ctx.strokeStyle='#d4a94e'; ctx.lineWidth=4; ctx.stroke();
+  roundRect(cx0+5,cy0+5,cw-10,chh-10,13);
+  ctx.strokeStyle='rgba(255,240,190,0.5)'; ctx.lineWidth=1.5; ctx.stroke();
+
+  ctx.fillStyle='rgba(255,255,255,0.62)'; ctx.font='23px "Microsoft YaHei",sans-serif';
+  ctx.fillText(`${TEAM_A.name} 触球 ${balls[0].bounces} 次 · ${TEAM_B.name} 触球 ${balls[1].bounces} 次`, W/2, 1010);
+  ctx.fillText(`本局用时 ${elapsed.toFixed(1)} 秒`, W/2, 1046);
+
+  if(age>1.2){
+    const p=0.5+Math.sin(now*4)*0.4;
+    ctx.fillStyle=`rgba(255,255,255,${p})`; ctx.font='bold 30px "Microsoft YaHei",sans-serif';
+    ctx.fillText('点击屏幕 · 再来一局', W/2, 1120);
+  }
+}
+
+/* ============ 主循环 ============ */
+let last=performance.now(), acc=0;
+function frame(t){
+  requestAnimationFrame(frame);
+  const dtReal=Math.min(0.05,(t-last)/1000); last=t; now+=dtReal;
+
+  if(state==='play'){
+    // 慢动作:仅当有球正朝奖杯区俯冲时触发,最多持续1.5秒
+    const inZone = balls.some(b=>b.out && b.y>1050 && b.vy>40 && Math.abs(b.x-W/2)<180);
+    if(inZone) slowT+=dtReal; else slowT=0;
+    tsTarget = (inZone && slowT<1.5) ? 0.35 : 1;
+    timeScale += (tsTarget-timeScale)*0.12;
+    acc += dtReal*timeScale;
+    let n=0;
+    while(acc>STEP && n<40){ step(STEP); acc-=STEP; n++; if(state!=='play')break; }
+    for(const b of balls){
+      b.trail.push({x:b.x,y:b.y});
+      if(b.trail.length>12) b.trail.shift();
+    }
+  }
+  for(let i=confetti.length-1;i>=0;i--){
+    const c=confetti[i];
+    c.vy+=900*dtReal; c.vx*=0.99;
+    c.x+=c.vx*dtReal; c.y+=c.vy*dtReal; c.rot+=c.vr*dtReal; c.life-=dtReal;
+    if(c.life<=0||c.y>H+40) confetti.splice(i,1);
+  }
+  if(state==='win' && confetti.length<60 && now-winAt<6){
+    const team=winner.team;
+    confetti.push({ x:Math.random()*W, y:-20, vx:(Math.random()-0.5)*120, vy:150+Math.random()*200,
+      c:[team.color,'#FFD700','#fff'][Math.floor(Math.random()*3)], s:5+Math.random()*8,
+      rot:Math.random()*TAU, vr:(Math.random()-0.5)*10, life:4 });
+  }
+  draw();
+}
+requestAnimationFrame(frame);
+
+/* ============ 交互 ============ */
+function canvasXY(e){
+  const r=cv.getBoundingClientRect();
+  const cx=(e.clientX-r.left)/r.width*W, cy=(e.clientY-r.top)/r.height*H;
+  return [cx,cy];
+}
+cv.addEventListener('pointerdown', e=>{
+  ac();
+  const [x,y]=canvasXY(e);
+  if(Math.hypot(x-47,y-95)<46){ reset(false); return; }           // 左灯笼:重开
+  if(Math.hypot(x-(W-47),y-95)<46){ soundOn=!soundOn; return; }   // 右灯笼:声音
+  if(state==='intro'){ state='play'; whistle(); say('🔔 决赛哨响！两队被关进旋转牢笼！'); return; }
+  if(state==='win' && now-winAt>0.8){ reset(false); return; }
+});
+addEventListener('keydown', e=>{ if(e.key==='r'||e.key==='R') reset(false); });
+
+/* ============ 自动录制模式 (?rec=N 连录N局, 需HTTP访问) ============ */
+(function(){
+  const q=new URLSearchParams(location.search).get('rec');
+  if(!q) return;
+  const TAKES=Math.max(1,parseInt(q)||4);
+  let takeIdx=0, recorder=null, chunks=[], armed=false, watchIv=null, stats=null, ended=false;
+
+  const hud=document.createElement('div');
+  hud.style.cssText='position:fixed;left:10px;bottom:10px;color:#fff;font:14px monospace;background:rgba(0,0,0,.65);padding:6px 12px;border-radius:8px;z-index:9;pointer-events:none';
+  hud.textContent='REC模式: 点击画面开始自动录制 '+TAKES+' 局';
+  document.body.appendChild(hud);
+
+  // 接管resize:录制期间画布物理尺寸锁死1080×1920,只允许CSS缩放
+  removeEventListener('resize', fit);
+  function cssFit(){
+    const ar=W/H; let ch=innerHeight, cw=ch*ar;
+    if(cw>innerWidth){ cw=innerWidth; ch=cw/ar; }
+    cv.style.width=cw+'px'; cv.style.height=ch+'px';
+  }
+  addEventListener('resize', cssFit);
+  cssFit(); cv.width=720; cv.height=1280;   // 720p足够小红书,编码压力小才能实时
+
+  cv.addEventListener('pointerdown', ()=>{
+    if(armed || !bgReady) return;
+    armed=true;
+    const a=ac(); if(a && a.state==='suspended') a.resume();
+    if(a) REC_DEST=a.createMediaStreamDestination();
+    startTake();
+  });
+
+  function startTake(){
+    takeIdx++;
+    if(watchIv){ clearInterval(watchIv); watchIv=null; }
+    reset(true);
+    chunks=[]; stats=null; ended=false;
+    let stream=cv.captureStream(30);
+    if(REC_DEST) stream=new MediaStream([...stream.getVideoTracks(), ...REC_DEST.stream.getAudioTracks()]);
+    const mime=MediaRecorder.isTypeSupported('video/webm;codecs=vp8')?'video/webm;codecs=vp8':'video/webm';
+    recorder=new MediaRecorder(stream,{mimeType:mime,videoBitsPerSecond:6000000});
+    recorder.ondataavailable=e=>{ if(e.data.size) chunks.push(e.data); };
+    recorder.onstop=()=>{
+      if(ended) return;
+      ended=true;
+      if(stats) uploadTake();
+      else { takeIdx--; setTimeout(startTake,300); }  // 意外死亡:废弃重录本局
+    };
+    recorder.onerror=e=>{ console.warn('recorder error', e); };
+    recorder.start(1000);
+    // 1.6秒开场页做钩子,然后自动开球
+    setTimeout(()=>{ if(state==='intro' && armed){ state='play'; whistle(); say('🔔 决赛哨响！两队被关进旋转牢笼！'); } },1600);
+    watch();
+  }
+  function abortRetake(){
+    clearInterval(watchIv); watchIv=null;
+    ended=true;              // 丢弃本局数据
+    try{ recorder.stop(); }catch(e){}
+    takeIdx--;
+    setTimeout(startTake, 300);
+  }
+  function watch(){
+    watchIv=setInterval(()=>{
+      hud.textContent=`REC ${takeIdx}/${TAKES} · ${state==='play'? elapsed.toFixed(0)+'s' : state}${recorder? ' ['+recorder.state+']':''}`;
+      // 录制器意外死亡 → 作废重录
+      if(recorder && recorder.state==='inactive' && state!=='win' && !ended){ abortRetake(); return; }
+      if(state==='win' && !stats){
+        stats={ wn: winner.team===TEAM_A?'ARG':'ESP',
+                dur: elapsed.toFixed(0),
+                miss: balls[0].misses+balls[1].misses };
+        clearInterval(watchIv); watchIv=null;
+        setTimeout(()=>{ try{ recorder.stop(); }catch(e){} }, 2600);  // 夺冠画面停 2.6 秒
+      } else if(state==='play' && elapsed>75){                        // 超时作废重录
+        abortRetake();
+      }
+    }, 300);
+  }
+  function uploadTake(){
+    const blob=new Blob(chunks,{type:'video/webm'});
+    const s=stats||{wn:'NA',dur:'0',miss:0};
+    const name=`take${takeIdx}_${s.wn}win_${s.dur}s_miss${s.miss}.webm`;
+    hud.textContent=`上传 ${name} (${(blob.size/1e6).toFixed(1)}MB)…`;
+    fetch('/upload?name='+encodeURIComponent(name),{method:'POST',body:blob})
+      .then(r=>{ if(!r.ok) throw new Error(r.status);
+        if(takeIdx<TAKES) startTake();
+        else { hud.textContent='✅ 全部 '+TAKES+' 局录制完成'; reset(true); }
+      })
+      .catch(e=>{ hud.textContent='❌ 上传失败: '+e; });
+  }
+})();
+</script>
+</body>
+</html>
